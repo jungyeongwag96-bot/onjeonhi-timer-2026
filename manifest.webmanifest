@@ -1,1 +1,26 @@
-{"name":"온전히 · 타이머","short_name":"온전히","description":"운동도, 기록도. 온전히.","lang":"ko","start_url":"./","scope":"./","display":"standalone","background_color":"#faf7ff","theme_color":"#9700fb","icons":[{"src":"assets/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"}]}
+{
+  "id": "./",
+  "name": "온전히 · 타이머",
+  "short_name": "온전히 타이머",
+  "description": "운동도, 기록도. 온전히. 인터벌 타이머와 스톱워치",
+  "lang": "ko",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#fbf9fe",
+  "theme_color": "#9700fb",
+  "icons": [
+    {
+      "src": "assets/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "assets/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
