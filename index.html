@@ -20,7 +20,7 @@ function notify(s){$('toast').textContent=s;$('toast').classList.add('show');cle
 const fmt=s=>{let n=Math.max(0,Math.ceil(s));return `${String(Math.floor(n/60)).padStart(2,'0')}:${String(n%60).padStart(2,'0')}`};const fmtMs=ms=>{const n=Math.max(0,Math.floor(ms/10));return `${String(Math.floor(n/6000)).padStart(2,'0')}:${String(Math.floor(n/100)%60).padStart(2,'0')}.${String(n%100).padStart(2,'0')}`};const cur=()=>presets.find(p=>p.id===selected)||presets[0];
 function getAudio(){try{audio??=new (window.AudioContext||window.webkitAudioContext)();if(audio.state==='suspended')audio.resume();return audio}catch{return null}}
 // 실제 녹음된 MP3를 sounds/ 폴더에서 불러옵니다. 재생 시 1회만 울립니다.
-const recordedPaths={boxing:'./sounds/boxing-bell.mp3',whistle:'./sounds/referee-whistle.mp3',horn:'./sounds/cheer-horn.mp3'};
+const recordedPaths={boxing:'./sounds/boxing-bell.m4a',whistle:'./sounds/referee-whistle.m4a',horn:'./sounds/cheer-horn.m4a'};
 const recordedPlayers={};
 for(const [key,path] of Object.entries(recordedPaths)){
   const a=new Audio(path);a.preload='auto'; recordedPlayers[key]=a;
