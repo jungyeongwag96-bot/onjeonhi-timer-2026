@@ -177,32 +177,54 @@ let presets=read(PKEY,defaultPresets),selected=read(SEL,'mine'),sounds={enabled:
 let phases=[],phaseIndex=0,remainingMs=0,deadline=0,running=false,completed=false,raf=0,activePreset=null,lastAnnounced=new Set(),audio=null;let swRunning=false,swStart=0,swMs=0,swRaf=0,records=read(RKEY,[]);if(!Array.isArray(records))records=[];
 function notify(s){$('toast').textContent=s;$('toast').classList.add('show');clearTimeout(notify.t);notify.t=setTimeout(()=>$('toast').classList.remove('show'),2300)}
 const fmt=s=>{let n=Math.max(0,Math.ceil(s));return `${String(Math.floor(n/60)).padStart(2,'0')}:${String(n%60).padStart(2,'0')}`};const fmtMs=ms=>{const n=Math.max(0,Math.floor(ms/10));return `${String(Math.floor(n/6000)).padStart(2,'0')}:${String(Math.floor(n/100)%60).padStart(2,'0')}.${String(n%100).padStart(2,'0')}`};const cur=()=>presets.find(p=>p.id===selected)||presets[0];
-function getAudio(){try{audio??=new (window.AudioContext||window.webkitAudioContext)();if(audio.state==='suspended')audio.resume();return audio}catch{return null}}
-// 실제 녹음된 MP3를 sounds/ 폴더에서 불러옵니다. 재생 시 1회만 울립니다.
+// V4.8 audio resilience: keep saved preferences and existing visuals unchanged.
+let audioUnlockReady = false;
+function getAudio(){
+  try{
+    const Constructor=window.AudioContext||window.webkitAudioContext;
+    if(!Constructor)return null;
+    audio??=new Constructor();
+    if(audio.state==='suspended')audio.resume().catch(()=>{});
+    return audio;
+  }catch(e){console.warn('AudioContext initialization failed',e);return null}
+}
 const recordedPaths={boxing:'./sounds/boxing-bell.m4a',whistle:'./sounds/referee-whistle.m4a',horn:'./sounds/cheer-horn.m4a'};
 const recordedPlayers={};
 for(const [key,path] of Object.entries(recordedPaths)){
-  const a=new Audio(path);a.preload='auto'; recordedPlayers[key]=a;
+  const a=new Audio(path);a.preload='auto';recordedPlayers[key]=a;
 }
-let missingAudioWarned=new Set();
-function sound(kind=sounds.kind){
-  if(!sounds.enabled||kind==='none')return;
+let lastSoundError='';
+function unlockAudio(){
+  const c=getAudio();
+  if(c&&c.state==='suspended')c.resume().catch(()=>{});
+  // A user gesture should unlock audio on Android Chrome / installed PWA.
+  if(c&&c.state==='running'&&!audioUnlockReady){
+    try{const src=c.createBufferSource();src.buffer=c.createBuffer(1,1,c.sampleRate);src.connect(c.destination);src.start(0);audioUnlockReady=true}catch{}
+  }
+}
+function audioFailure(kind,error){
+  const name=recordedPaths[kind]||kind;
+  const reason=error?.name||'재생 실패';
+  console.warn('Onjeonhi audio failure',name,error);
+  const message= reason==='NotAllowedError'?'소리 재생이 차단됐어요. 시작 버튼을 다시 눌러 주세요.':
+    reason==='NotSupportedError'?'이 기기에서 음원 형식을 재생할 수 없어요.':
+    `음원 재생 실패: ${name} (${reason})`;
+  if(lastSoundError!==message){lastSoundError=message;notify(message)}
+}
+function sound(kind=sounds.kind, forcePreview=false){
+  if((!sounds.enabled&&!forcePreview)||kind==='none')return;
   if(recordedPaths[kind]){
     const player=recordedPlayers[kind];
-    player.pause();
-    try {player.currentTime=0;}catch{}
-    player.volume=Math.min(1,Math.max(0,sounds.volume/100));
-    const playPromise=player.play();
-    if(playPromise && typeof playPromise.catch==='function')playPromise.catch(()=>{
-      if(!missingAudioWarned.has(kind)){
-        missingAudioWarned.add(kind);
-        notify('실제 음원 파일을 확인해 주세요: '+recordedPaths[kind]);
-      }
-    });
+    try{
+      player.pause();player.currentTime=0;
+      player.volume=Math.min(1,Math.max(0,sounds.volume/100));
+      const attempt=player.play();
+      if(attempt&&typeof attempt.catch==='function')attempt.catch(e=>audioFailure(kind,e));
+    }catch(e){audioFailure(kind,e)}
     return;
   }
-  // 원래 설정에 있던 맑은 벨·비프·부드러운 차임과 카운트다운 비프는 유지합니다.
-  const c=getAudio();if(!c)return;
+  const c=getAudio();if(!c){notify('브라우저 오디오를 사용할 수 없어요.');return}
+  if(c.state!=='running'){notify('오디오가 일시중지됐어요. 시작 버튼을 다시 눌러 주세요.');return}
   const now=c.currentTime,amp=.17*sounds.volume/100;
   const seq=kind==='chime'?[[660,0,.16],[880,.18,.27]]:kind==='soft'?[[520,0,.3]]:[[900,0,.14]];
   seq.forEach(([f,d,dur])=>{
@@ -213,8 +235,33 @@ function sound(kind=sounds.kind){
     o.connect(g).connect(c.destination);o.start(now+d);o.stop(now+d+dur+.01);
   });
 }
-
-function speak(txt){if(!sounds.enabled||!sounds.voice||!('speechSynthesis'in window))return;try{window.speechSynthesis.cancel();let u=new SpeechSynthesisUtterance(txt);u.lang='ko-KR';u.rate=1.05;u.volume=sounds.voiceVolume/100;window.speechSynthesis.speak(u)}catch{}}
+let speechQueue=[];let speaking=false;
+function nextSpeech(){
+  if(speaking||!speechQueue.length||!('speechSynthesis'in window))return;
+  const item=speechQueue.shift();speaking=true;
+  try{
+    const u=new SpeechSynthesisUtterance(item);
+    u.lang='ko-KR';u.rate=1.05;u.volume=Math.min(1,Math.max(0,sounds.voiceVolume/100));
+    const voices=window.speechSynthesis.getVoices();
+    const korean=voices.find(v=>v.lang?.toLowerCase().startsWith('ko'));
+    if(korean)u.voice=korean;
+    u.onend=u.onerror=()=>{speaking=false;nextSpeech()};
+    window.speechSynthesis.speak(u);
+  }catch(e){console.warn('Speech failed',e);speaking=false}
+}
+function speak(txt){
+  if(!sounds.enabled||!sounds.voice||!('speechSynthesis'in window))return;
+  // Avoid cancel() on each tick: this previously interrupted announcements.
+  if(speechQueue.length>=3)speechQueue.shift();
+  speechQueue.push(txt);nextSpeech();
+}
+function resumeAudioOnReturn(){
+  if(document.visibilityState!=='visible')return;
+  getAudio();
+  if('speechSynthesis'in window){try{window.speechSynthesis.getVoices()}catch{}}
+}
+document.addEventListener('visibilitychange',resumeAudioOnReturn);
+window.addEventListener('pageshow',resumeAudioOnReturn);
 // Haptic feedback: only on supported Android browsers, in foreground.
 function pulseVibration(pattern=[180,80,180]){
   if(!sounds.vibrate)return false;
@@ -238,13 +285,13 @@ function onPhase(){lastAnnounced=new Set();let p=phases[phaseIndex];if(!p)return
 function countdown(){let sec=Math.ceil(remainingMs/1000),p=phases[phaseIndex];if(!p||lastAnnounced.has(sec))return;lastAnnounced.add(sec);if(sounds.countdown&&sec<=3&&sec>=1){sound('beep');if(sounds.voice)speak(String(sec))}else if(sec===10&&sounds.ten)speak('10초 남음');else if(sec===5&&sounds.five)speak('5초 남음')}
 function frame(){if(!running)return;const now=performance.now();remainingMs=Math.max(0,deadline-now);let guard=0;while(remainingMs<=0&&running&&guard++<phases.length+1){const overdue=Math.max(0,now-deadline);phaseIndex++;if(phaseIndex>=phases.length){completed=true;running=false;cancelAnimationFrame(raf);$('startBtn').textContent='▶ 다시 시작하기';sound();pulseVibration([250,100,250,100,250]);paint();return}remainingMs=phases[phaseIndex].ms;deadline=now+remainingMs-overdue;remainingMs=Math.max(0,deadline-now);onPhase()}countdown();paint();raf=requestAnimationFrame(frame)}
 function resetTimer(){running=false;cancelAnimationFrame(raf);phases=[];phaseIndex=0;remainingMs=0;deadline=0;completed=false;activePreset=null;$('startBtn').textContent='▶ 시작하기';$('selectedName').textContent=cur().name;paint()}
-function toggleTimer(){getAudio();if(running){remainingMs=Math.max(0,deadline-performance.now());running=false;cancelAnimationFrame(raf);$('startBtn').textContent='▶ 계속하기';paint();return}if(!phases.length||completed){activePreset={...cur()};phases=build(activePreset);phaseIndex=0;completed=false;remainingMs=phases[0].ms;onPhase()}deadline=performance.now()+remainingMs;running=true;$('startBtn').textContent='Ⅱ 잠시 멈추기';frame()}
+function toggleTimer(){unlockAudio();if(running){remainingMs=Math.max(0,deadline-performance.now());running=false;cancelAnimationFrame(raf);$('startBtn').textContent='▶ 계속하기';paint();return}if(!phases.length||completed){activePreset={...cur()};phases=build(activePreset);phaseIndex=0;completed=false;remainingMs=phases[0].ms;onPhase()}deadline=performance.now()+remainingMs;running=true;$('startBtn').textContent='Ⅱ 잠시 멈추기';frame()}
 function skip(){if(!phases.length||completed)return;phaseIndex++;if(phaseIndex>=phases.length){completed=true;running=false;pulseVibration([250,100,250]);paint();$('startBtn').textContent='▶ 다시 시작하기';return}remainingMs=phases[phaseIndex].ms;if(running)deadline=performance.now()+remainingMs;onPhase()}
 function selectPreset(id){if(running){notify('실행 중에는 타이머를 변경할 수 없어요');return}selected=id;store(SEL,id);resetTimer();renderPresets()}
 function renderPresets(){let root=$('presetList');root.replaceChildren();presets.forEach(p=>{const b=document.createElement('button');b.className='preset'+(p.id===selected?' selected':'');const summ=fmt((p.prepare+p.cycles*p.rounds*p.work+(p.rounds*p.cycles-1)*p.rest+(p.cycles-1)*p.cycleRest));b.innerHTML=`<small>${p.id===selected?'SELECTED':'INTERVAL TIMER'}</small><h3></h3><p></p>`;b.querySelector('h3').textContent=p.name;b.querySelector('p').textContent=`운동 ${fmt(p.work)} · 휴식 ${fmt(p.rest)} / ${p.rounds}라운드 × ${p.cycles}사이클\n총 ${summ}`;b.onclick=()=>selectPreset(p.id);root.appendChild(b)})}
 function openModal(title,markup){$('modalTitle').textContent=title;$('modalContent').innerHTML=markup;$('modalBackdrop').hidden=false;document.body.style.overflow='hidden'}function closeModal(){$('modalBackdrop').hidden=true;document.body.style.overflow=''}
 function editPreset(isNew=false){if(running){notify('타이머를 중지하고 편집해 주세요');return}const p=isNew?{name:'새 타이머',work:30,rest:15,rounds:4,cycles:1,prepare:5,cycleRest:0}:cur();const field=(id,label,val,min=0,max=3600)=>`<div class="field"><label for="${id}">${label}</label><input id="${id}" type="number" min="${min}" max="${max}" value="${val}"></div>`;openModal(isNew?'새 타이머 만들기':'타이머 편집',`<div class="field"><label for="pName">타이머 이름</label><input id="pName" maxlength="30" value=""></div><div class="grid2">${field('pWork','운동 시간 (초)',p.work,1)}${field('pRest','휴식 시간 (초)',p.rest)}${field('pRounds','라운드 수',p.rounds,1,99)}${field('pCycles','사이클 수',p.cycles,1,99)}${field('pPrepare','준비 시간 (초)',p.prepare)}${field('pCycleRest','사이클 추가 휴식 (초)',p.cycleRest)}</div><p class="helper">각 라운드 사이 휴식과 사이클 사이 휴식이 적용돼요. 마지막 운동 뒤에는 휴식이 없어요.</p><button id="savePreset" class="modal-action">저장하기</button>${!isNew?'<button id="deletePreset" class="modal-action danger">이 타이머 삭제</button>':''}`);$('pName').value=p.name;const val=(id,min,max)=>{const raw=Number($(id).value);return Number.isFinite(raw)?Math.min(max,Math.max(min,Math.floor(raw))):min};$('savePreset').onclick=()=>{const name=$('pName').value.trim();if(!name){notify('이름을 입력해 주세요');return}const item={id:isNew?'custom-'+Date.now():p.id,name,work:val('pWork',1,3600),rest:val('pRest',0,3600),rounds:val('pRounds',1,99),cycles:val('pCycles',1,99),prepare:val('pPrepare',0,3600),cycleRest:val('pCycleRest',0,3600)};if(isNew)presets.push(item);else presets=presets.map(q=>q.id===p.id?item:q);store(PKEY,presets);selected=item.id;store(SEL,selected);resetTimer();renderPresets();closeModal();notify('타이머가 저장됐어요')};if(!isNew)return $('deletePreset').onclick=()=>{if(presets.length<=1){notify('마지막 타이머는 삭제할 수 없어요');return}presets=presets.filter(q=>q.id!==p.id);selected=presets[0].id;store(PKEY,presets);store(SEL,selected);resetTimer();renderPresets();closeModal()}}
-function soundModal(){const choices=[['chime','맑은 벨'],['beep','디지털 비프'],['soft','부드러운 차임'],['boxing','복싱벨'],['whistle','심판 휘슬'],['horn','응원 나팔']];openModal('사운드 설정',`<div class="settings-row"><label for="soundKind">알림 소리</label><select id="soundKind">${choices.map(([v,n])=>`<option value="${v}">${n}</option>`).join('')}</select></div><p class="helper">복싱벨·심판 휘슬·나팔은 sounds 폴더의 실제 녹음 MP3를 재생합니다. 음원 파일을 넣기 전에는 해당 소리가 재생되지 않습니다.</p><div class="settings-row"><label>마스터 음량</label><input id="masterVolume" type="range" min="0" max="100"></div><p class="helper">알림은 운동·휴식의 시작과 완료 시에만 울려요. 3·2·1·10초·5초 남음은 음성 안내 설정에 따라 말로 알려줘요.</p>${[['countdown','3·2·1 카운트다운'],['voice','음성 안내'],['ten','10초 남음'],['five','5초 남음'],['roundName','라운드 이름'],['vibrate','진동']].map(([k,n])=>`<div class="settings-row"><label for="setting-${k}">${n}</label><input type="checkbox" id="setting-${k}"></div>`).join('')}<p class="helper">음성 안내와 라운드 이름을 켜면 “1라운드 운동 시작”처럼 현재 라운드를 읽어줘요.</p><div class="settings-row"><label>음성 음량</label><input id="voiceVolume" type="range" min="0" max="100"></div><p class="helper">진동은 라운드의 운동·휴식 전환과 완료 시 울려요. 일부 브라우저(특히 iPhone Safari)에서는 진동 API를 지원하지 않으며, 화면 잠금·절전 모드에서는 제한될 수 있어요.</p><button class="modal-action secondary" id="testVibration" type="button">📳 진동 테스트</button><button class="modal-action" id="previewSound">♪ 소리 미리듣기</button><p class="helper">기기 미디어 음량을 켜 주세요. 화면 잠금·백그라운드에서는 브라우저가 소리를 제한할 수 있어요.</p>`);$('soundKind').value=sounds.kind;$('masterVolume').value=sounds.volume;$('voiceVolume').value=sounds.voiceVolume;for(const k of ['countdown','voice','ten','five','roundName','vibrate'])$('setting-'+k).checked=!!sounds[k];const save=()=>{sounds.kind=$('soundKind').value;sounds.volume=+$('masterVolume').value;sounds.voiceVolume=+$('voiceVolume').value;for(const k of ['countdown','voice','ten','five','roundName','vibrate'])sounds[k]=$('setting-'+k).checked;store(SKEY,sounds)};$('modalContent').querySelectorAll('input,select').forEach(el=>el.addEventListener('change',save));$('previewSound').onclick=()=>{save();sound()};$('testVibration').onclick=()=>{save();testVibration()}}
+function soundModal(){const choices=[['chime','맑은 벨'],['beep','디지털 비프'],['soft','부드러운 차임'],['boxing','복싱벨'],['whistle','심판 휘슬'],['horn','응원 나팔']];openModal('사운드 설정',`<div class="settings-row"><label for="soundKind">알림 소리</label><select id="soundKind">${choices.map(([v,n])=>`<option value="${v}">${n}</option>`).join('')}</select></div><p class="helper">복싱벨·심판 휘슬·나팔은 sounds 폴더의 실제 녹음 M4A 파일을 재생합니다.</p><div class="settings-row"><label>마스터 음량</label><input id="masterVolume" type="range" min="0" max="100"></div><p class="helper">알림은 운동·휴식의 시작과 완료 시에만 울려요. 3·2·1·10초·5초 남음은 음성 안내 설정에 따라 말로 알려줘요.</p>${[['countdown','3·2·1 카운트다운'],['voice','음성 안내'],['ten','10초 남음'],['five','5초 남음'],['roundName','라운드 이름'],['vibrate','진동']].map(([k,n])=>`<div class="settings-row"><label for="setting-${k}">${n}</label><input type="checkbox" id="setting-${k}"></div>`).join('')}<p class="helper">음성 안내와 라운드 이름을 켜면 “1라운드 운동 시작”처럼 현재 라운드를 읽어줘요.</p><div class="settings-row"><label>음성 음량</label><input id="voiceVolume" type="range" min="0" max="100"></div><p class="helper">진동은 라운드의 운동·휴식 전환과 완료 시 울려요. 일부 브라우저(특히 iPhone Safari)에서는 진동 API를 지원하지 않으며, 화면 잠금·절전 모드에서는 제한될 수 있어요.</p><button class="modal-action secondary" id="testVibration" type="button">📳 진동 테스트</button><button class="modal-action" id="previewSound">♪ 소리 미리듣기</button><p class="helper">기기 미디어 음량을 켜 주세요. 화면 잠금·백그라운드에서는 브라우저가 소리를 제한할 수 있어요.</p>`);$('soundKind').value=sounds.kind;$('masterVolume').value=sounds.volume;$('voiceVolume').value=sounds.voiceVolume;for(const k of ['countdown','voice','ten','five','roundName','vibrate'])$('setting-'+k).checked=!!sounds[k];const save=()=>{sounds.kind=$('soundKind').value;sounds.volume=+$('masterVolume').value;sounds.voiceVolume=+$('voiceVolume').value;for(const k of ['countdown','voice','ten','five','roundName','vibrate'])sounds[k]=$('setting-'+k).checked;store(SKEY,sounds)};$('modalContent').querySelectorAll('input,select').forEach(el=>el.addEventListener('change',save));$('previewSound').onclick=()=>{save();unlockAudio();if(!sounds.enabled){notify('소리 스위치가 꺼져 있어요. 미리듣기는 재생해 볼게요.')}sound(sounds.kind,true)};$('testVibration').onclick=()=>{save();testVibration()}}
 function viewPlan(){const p=cur();openModal('인터벌 보기',`<h3>${p.name}</h3><p>준비 ${fmt(p.prepare)} · 운동 ${fmt(p.work)} · 휴식 ${fmt(p.rest)}</p><p>${p.rounds}라운드 × ${p.cycles}사이클</p><p class="helper">매 사이클에서 운동과 휴식을 반복한 다음, 다음 사이클로 넘어가요.</p><button class="modal-action" id="okPlan">확인</button>`);$('okPlan').onclick=closeModal}
 function swElapsed(){return swMs+(swRunning?performance.now()-swStart:0)}function swFrameTick(){if(!swRunning)return;$('swClock').textContent=fmtMs(swElapsed());swRaf=requestAnimationFrame(swFrameTick)}
 function swToggle(){if(swRunning){swMs=swElapsed();swRunning=false;cancelAnimationFrame(swRaf);$('swStart').textContent='▶ 시작';$('swStatus').textContent='측정이 중지됐어요';if(swMs>0){records.unshift({ms:swMs,at:new Date().toISOString()});records=records.slice(0,100);store(RKEY,records);renderRecords();notify('기록이 저장됐어요')}swMs=0;$('swClock').textContent='00:00.00'}else{swStart=performance.now();swRunning=true;$('swStart').textContent='Ⅱ 중지';$('swStatus').textContent='측정 중';swFrameTick()}}
@@ -252,7 +299,7 @@ function swReset(){swRunning=false;cancelAnimationFrame(swRaf);swMs=0;$('swClock
 function renderRecords(){$('recordCount').textContent=`${records.length}회`;$('clearRecords').disabled=!records.length;$('bestRecord').textContent=records.length?fmtMs(Math.min(...records.map(x=>x.ms))):'–';$('averageRecord').textContent=records.length>=5?fmtMs(records.slice(0,5).reduce((s,x)=>s+x.ms,0)/5):'5회 측정 후 표시';$('recordList').replaceChildren();records.slice(0,10).forEach(x=>{let li=document.createElement('li'),d=new Date(x.at);li.textContent=d.toLocaleString('ko-KR')+'  ';const span=document.createElement('span');span.textContent=fmtMs(x.ms);li.append(span);$('recordList').append(li)})}
 function fullscreen(which){let stage=$(which==='interval'?'intervalStage':'stopwatchStage');if(document.fullscreenElement){document.exitFullscreen?.();return}if(stage.requestFullscreen){stage.requestFullscreen().catch(()=>{document.body.classList.toggle('fullscreen-mode')})}else document.body.classList.toggle('fullscreen-mode')}
 function tab(which){const iv=which==='interval';$('intervalPage').hidden=!iv;$('stopwatchPage').hidden=iv;$('intervalTab').classList.toggle('active',iv);$('stopwatchTab').classList.toggle('active',!iv)}
-$('intervalTab').onclick=()=>tab('interval');$('stopwatchTab').onclick=()=>tab('stopwatch');$('startBtn').onclick=toggleTimer;$('resetBtn').onclick=resetTimer;$('skipBtn').onclick=skip;$('fullscreenBtn').onclick=()=>fullscreen('interval');$('swFull').onclick=()=>fullscreen('stopwatch');$('newPreset').onclick=()=>editPreset(true);$('editCurrent').onclick=()=>editPreset();$('soundSettingsBtn').onclick=soundModal;$('viewPlanBtn').onclick=viewPlan;$('soundEnabled').checked=sounds.enabled;$('soundEnabled').onchange=e=>{sounds.enabled=e.target.checked;store(SKEY,sounds)};$('swStart').onclick=swToggle;$('swReset').onclick=swReset;$('clearRecords').onclick=()=>{if(confirm('저장된 스톱워치 기록을 모두 삭제할까요?')){records=[];store(RKEY,records);renderRecords()}};$('modalClose').onclick=closeModal;$('modalBackdrop').onclick=e=>{if(e.target===$('modalBackdrop'))closeModal()};document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement)document.body.classList.remove('fullscreen-mode')});document.addEventListener('keydown',e=>{if(['INPUT','SELECT','TEXTAREA','BUTTON'].includes(document.activeElement?.tagName))return;if(e.code==='Escape')closeModal();if(e.code==='Space'){e.preventDefault();$('intervalPage').hidden?swToggle():toggleTimer()}if(e.code==='KeyR')$('intervalPage').hidden?swReset():resetTimer()});renderPresets();resetTimer();renderRecords();if('serviceWorker'in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('./service-worker.js').catch(()=>{}));
+$('intervalTab').onclick=()=>tab('interval');$('stopwatchTab').onclick=()=>tab('stopwatch');$('startBtn').onclick=toggleTimer;$('resetBtn').onclick=resetTimer;$('skipBtn').onclick=skip;$('fullscreenBtn').onclick=()=>fullscreen('interval');$('swFull').onclick=()=>fullscreen('stopwatch');$('newPreset').onclick=()=>editPreset(true);$('editCurrent').onclick=()=>editPreset();$('soundSettingsBtn').onclick=soundModal;$('viewPlanBtn').onclick=viewPlan;$('soundEnabled').checked=sounds.enabled;$('soundEnabled').onchange=e=>{sounds.enabled=e.target.checked;store(SKEY,sounds);if(sounds.enabled)unlockAudio()};$('swStart').onclick=swToggle;$('swReset').onclick=swReset;$('clearRecords').onclick=()=>{if(confirm('저장된 스톱워치 기록을 모두 삭제할까요?')){records=[];store(RKEY,records);renderRecords()}};$('modalClose').onclick=closeModal;$('modalBackdrop').onclick=e=>{if(e.target===$('modalBackdrop'))closeModal()};document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement)document.body.classList.remove('fullscreen-mode')});document.addEventListener('keydown',e=>{if(['INPUT','SELECT','TEXTAREA','BUTTON'].includes(document.activeElement?.tagName))return;if(e.code==='Escape')closeModal();if(e.code==='Space'){e.preventDefault();$('intervalPage').hidden?swToggle():toggleTimer()}if(e.code==='KeyR')$('intervalPage').hidden?swReset():resetTimer()});renderPresets();resetTimer();renderRecords();if('serviceWorker'in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('./service-worker.js').catch(()=>{}));
 
 
 // PWA install guidance (does not modify existing timer or stopwatch behavior)
