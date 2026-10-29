@@ -166,7 +166,7 @@
 'use strict';
 const $=id=>document.getElementById(id),PKEY='onjeonhi-original-presets-v1',SKEY='onjeonhi-original-sounds-v1',RKEY='onjeonhi-original-records-v1',SEL='onjeonhi-original-selected-v1';
 const read=(k,f)=>{try{return JSON.parse(localStorage.getItem(k))??f}catch{return f}};const store=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));return true}catch{notify('브라우저 저장에 실패했어요');return false}};
-const defaultPresets=[{id:'mine',name:'마이 타바타',work:30,rest:30,rounds:4,cycles:3,prepare:5,cycleRest:0},{id:'classic',name:'클래식 타바타',work:20,rest:10,rounds:8,cycles:1,prepare:10,cycleRest:0},{id:'hiit',name:'HIIT · 힘차게',work:40,rest:20,rounds:6,cycles:2,prepare:10,cycleRest:0},{id:'stretch',name:'가벼운 스트레칭',work:60,rest:15,rounds:5,cycles:1,prepare:10,cycleRest:0}];
+const defaultPresets=[{id:'mine',name:'타바타(4분)',work:20,rest:10,rounds:8,cycles:1,prepare:20,cycleRest:60},{id:'classic',name:'인터벌 트레이닝',work:40,rest:20,rounds:6,cycles:3,prepare:10,cycleRest:20},{id:'hiit',name:'달리기 인터벌',work:30,rest:60,rounds:10,cycles:1,prepare:10,cycleRest:0},{id:'stretch',name:'스트레칭',work:30,rest:15,rounds:20,cycles:1,prepare:10,cycleRest:0}];
 let presets=read(PKEY,defaultPresets),selected=read(SEL,'mine'),sounds={enabled:true,kind:'boxing',volume:100,countdown:true,voice:true,ten:true,five:true,roundName:true,voiceVolume:100,vibrate:false,...read(SKEY,{})};if(!Array.isArray(presets)||!presets.length)presets=structuredClone(defaultPresets);if(!presets.some(p=>p.id===selected))selected=presets[0].id;
 let phases=[],phaseIndex=0,remainingMs=0,deadline=0,running=false,completed=false,raf=0,activePreset=null,lastAnnounced=new Set(),audio=null;let swRunning=false,swStart=0,swMs=0,swRaf=0,records=read(RKEY,[]);if(!Array.isArray(records))records=[];
 function notify(s){$('toast').textContent=s;$('toast').classList.add('show');clearTimeout(notify.t);notify.t=setTimeout(()=>$('toast').classList.remove('show'),2300)}
@@ -217,12 +217,12 @@ function pulseVibration(pattern=[180,80,180]){
 }
 function testVibration(){
   if(typeof navigator.vibrate!=='function'){
-    toast('이 브라우저는 진동 API를 지원하지 않아요. Android Chrome에서 시도해 주세요.');return;
+    notify('이 브라우저는 진동 API를 지원하지 않아요. Android Chrome에서 시도해 주세요.');return;
   }
   try{
-    const success=navigator.vibrate([220,90,220]);
-    toast(success?'진동 테스트를 요청했어요. 무음/진동 설정 및 기기 제한도 확인해 주세요.':'이 환경에서는 진동이 허용되지 않아요.');
-  }catch{toast('브라우저에서 진동을 사용할 수 없어요.')}
+    const success=navigator.vibrate([320,140,320]);
+    notify(success?'진동 요청을 보냈어요. 느껴지지 않으면 휴대폰 진동 설정과 브라우저 제한을 확인해 주세요.':'이 환경에서는 진동이 허용되지 않아요.');
+  }catch{notify('브라우저에서 진동을 사용할 수 없어요.')}
 }
 function phaseLabel(p){return p?.type==='prepare'?'준비':p?.type==='work'?'운동':p?.type==='rest'?'휴식':p?.type==='cycle'?'사이클 휴식':'완료'}
 function build(p){let a=[];if(p.prepare>0)a.push({type:'prepare',ms:p.prepare*1000,round:1,cycle:1});for(let c=1;c<=p.cycles;c++){for(let r=1;r<=p.rounds;r++){a.push({type:'work',ms:p.work*1000,round:r,cycle:c});if(r<p.rounds&&p.rest>0)a.push({type:'rest',ms:p.rest*1000,round:r,cycle:c})}if(c<p.cycles){if(p.cycleRest>0)a.push({type:'cycle',ms:p.cycleRest*1000,round:p.rounds,cycle:c});else if(p.rest>0)a.push({type:'rest',ms:p.rest*1000,round:p.rounds,cycle:c})}}return a}
