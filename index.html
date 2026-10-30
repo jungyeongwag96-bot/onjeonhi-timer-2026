@@ -186,9 +186,9 @@ for(const [key,path] of Object.entries(recordedPaths)){
   const a=new Audio(path);a.preload='auto'; recordedPlayers[key]=a;
 }
 let missingAudioWarned=new Set();
-// V5.2: alert sound first, then voice after a 300ms gap. No simultaneous playback.
+// V5.2: alert sound first, then voice after a 1000ms gap. No simultaneous playback.
 let cueSerial=0;
-const GAP_AFTER_ALERT_MS=300;
+const GAP_AFTER_ALERT_MS=1000;
 function stopCueAudio(){
   for(const p of Object.values(recordedPlayers)){try{p.pause();p.currentTime=0}catch{}}
   try{window.speechSynthesis?.cancel()}catch{}
