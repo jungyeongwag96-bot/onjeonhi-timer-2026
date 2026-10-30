@@ -170,6 +170,7 @@
 <div id="modalBackdrop" class="modal-backdrop" hidden><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-head"><h2 id="modalTitle"></h2><button id="modalClose" class="link-btn">닫기 ×</button></div><div id="modalContent"></div></div></div><div id="toast" class="toast" role="status" aria-live="polite"></div><aside id="installGuide" aria-label="앱 설치 안내" hidden><div class="install-top"><span class="install-mark" aria-hidden="true">◉</span><div><strong>온전히를 앱으로 설치하세요</strong><p id="installHelp">홈 화면에서 바로 열고, 주소창 없이 집중하세요.</p></div><button id="installClose" aria-label="설치 안내 닫기" type="button">×</button></div><div class="install-actions"><button id="installAction" type="button">앱 설치하기</button><button id="installDismiss" type="button">다시 보지 않기</button></div></aside>
 <script>
 'use strict';
+// V5.2 non-overlapping alert and speech sequence
 const $=id=>document.getElementById(id),PKEY='onjeonhi-original-presets-v1',SKEY='onjeonhi-original-sounds-v1',RKEY='onjeonhi-original-records-v1',SEL='onjeonhi-original-selected-v1';
 const read=(k,f)=>{try{return JSON.parse(localStorage.getItem(k))??f}catch{return f}};const store=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));return true}catch{notify('브라우저 저장에 실패했어요');return false}};
 const defaultPresets=[{id:'mine',name:'타바타(4분)',work:20,rest:10,rounds:8,cycles:1,prepare:20,cycleRest:60},{id:'classic',name:'인터벌 트레이닝',work:40,rest:20,rounds:6,cycles:3,prepare:10,cycleRest:20},{id:'hiit',name:'달리기 인터벌',work:30,rest:60,rounds:10,cycles:1,prepare:10,cycleRest:0},{id:'stretch',name:'스트레칭',work:30,rest:15,rounds:20,cycles:1,prepare:10,cycleRest:0}];
@@ -185,25 +186,31 @@ for(const [key,path] of Object.entries(recordedPaths)){
   const a=new Audio(path);a.preload='auto'; recordedPlayers[key]=a;
 }
 let missingAudioWarned=new Set();
+// V5.2: alert sound first, then voice after a 300ms gap. No simultaneous playback.
+let cueSerial=0;
+const GAP_AFTER_ALERT_MS=300;
+function stopCueAudio(){
+  for(const p of Object.values(recordedPlayers)){try{p.pause();p.currentTime=0}catch{}}
+  try{window.speechSynthesis?.cancel()}catch{}
+}
 function sound(kind=sounds.kind, preview=false){
-  if((!sounds.enabled && !preview)||kind==='none')return;
+  if((!sounds.enabled && !preview)||kind==='none')return Promise.resolve();
   if(recordedPaths[kind]){
     const player=recordedPlayers[kind];
-    player.pause();
-    try {player.currentTime=0;}catch{}
+    try{player.pause();player.currentTime=0}catch{}
     player.volume=Math.min(1,Math.max(0,preview && sounds.volume===0 ? 1 : sounds.volume/100));
-    let playPromise;
-    try{playPromise=player.play()}catch(err){notify('알림음 실행 오류: '+(err?.name||'재생 불가'));return}
-    if(playPromise && typeof playPromise.catch==='function')playPromise.catch((err)=>{
-      if(!missingAudioWarned.has(kind)){
-        missingAudioWarned.add(kind);
-        notify('소리 재생 실패 ('+(err?.name||'오류')+'). 기기 음량·오디오 권한을 확인해 주세요.');
-      }
+    return new Promise(resolve=>{
+      let finished=false;
+      const settle=()=>{if(finished)return;finished=true;clearTimeout(fallback);player.removeEventListener('ended',settle);player.removeEventListener('error',failed);resolve()};
+      const failed=()=>{if(!missingAudioWarned.has(kind)){missingAudioWarned.add(kind);notify('음원 재생 실패: '+recordedPaths[kind])}settle()};
+      player.addEventListener('ended',settle,{once:true});
+      player.addEventListener('error',failed,{once:true});
+      // The normal completion path is 'ended'; this safety limit prevents a stalled queue.
+      const fallback=setTimeout(settle,12000);
+      try{const promise=player.play();if(promise?.catch)promise.catch(failed)}catch{failed()}
     });
-    return;
   }
-  // 원래 설정에 있던 맑은 벨·비프·부드러운 차임과 카운트다운 비프는 유지합니다.
-  const c=getAudio();if(!c)return;
+  const c=getAudio();if(!c)return Promise.resolve();
   const now=c.currentTime,amp=.17*(preview&&sounds.volume===0?1:sounds.volume/100);
   const seq=kind==='chime'?[[660,0,.16],[880,.18,.27]]:kind==='soft'?[[520,0,.3]]:[[900,0,.14]];
   seq.forEach(([f,d,dur])=>{
@@ -213,9 +220,28 @@ function sound(kind=sounds.kind, preview=false){
     g.gain.exponentialRampToValueAtTime(.0001,now+d+dur);
     o.connect(g).connect(c.destination);o.start(now+d);o.stop(now+d+dur+.01);
   });
+  return new Promise(resolve=>setTimeout(resolve,Math.ceil((Math.max(...seq.map(x=>x[1]+x[2]))+.02)*1000)));
 }
-
-function speak(txt){if(!sounds.enabled||!sounds.voice||!('speechSynthesis'in window))return;try{const synth=window.speechSynthesis;if(synth.paused)synth.resume();synth.cancel();const u=new SpeechSynthesisUtterance(txt);u.lang='ko-KR';u.rate=1.05;u.volume=Math.min(1,Math.max(0,sounds.voiceVolume/100));synth.speak(u)}catch(err){console.warn('음성 안내 실패',err)}}
+function speak(txt){
+  if(!sounds.enabled||!sounds.voice||!('speechSynthesis'in window))return;
+  try{const synth=window.speechSynthesis;if(synth.paused)synth.resume();synth.cancel();const u=new SpeechSynthesisUtterance(txt);u.lang='ko-KR';u.rate=1.05;u.volume=Math.min(1,Math.max(0,sounds.voiceVolume/100));synth.speak(u)}catch(err){console.warn('음성 안내 실패',err)}
+}
+function alertThenVoice(kind, text=null){
+  const mySerial=++cueSerial;
+  stopCueAudio();
+  // A new cue takes priority over an earlier spoken message.
+  const afterSound=sound(kind);
+  if(!text||!sounds.enabled||!sounds.voice)return;
+  Promise.resolve(afterSound).then(()=>{
+    if(mySerial!==cueSerial)return;
+    setTimeout(()=>{if(mySerial===cueSerial)speak(text)},GAP_AFTER_ALERT_MS);
+  });
+}
+function voiceOnly(text){
+  ++cueSerial;
+  stopCueAudio();
+  speak(text);
+}
 // Haptic feedback: only on supported Android browsers, in foreground.
 function pulseVibration(pattern=[180,80,180]){
   if(!sounds.vibrate)return false;
@@ -235,11 +261,11 @@ function phaseLabel(p){return p?.type==='prepare'?'준비':p?.type==='work'?'운
 function build(p){let a=[];if(p.prepare>0)a.push({type:'prepare',ms:p.prepare*1000,round:1,cycle:1});for(let c=1;c<=p.cycles;c++){for(let r=1;r<=p.rounds;r++){a.push({type:'work',ms:p.work*1000,round:r,cycle:c});if(r<p.rounds&&p.rest>0)a.push({type:'rest',ms:p.rest*1000,round:r,cycle:c})}if(c<p.cycles){if(p.cycleRest>0)a.push({type:'cycle',ms:p.cycleRest*1000,round:p.rounds,cycle:c});else if(p.rest>0)a.push({type:'rest',ms:p.rest*1000,round:p.rounds,cycle:c})}}return a}
 const total=(a,idx=0,rem=null)=>a.slice(idx).reduce((s,p,i)=>s+(i===0&&rem!==null?rem:p.ms),0);
 function paint(){let p=phases[phaseIndex];let base=activePreset||cur();if(!p){let initial=build(base);$('phase').textContent='준비';$('clock').textContent=fmt(base.prepare||base.work);$('intervalNote').textContent='시작할 준비가 됐어요';$('roundStat').textContent=`1 / ${base.rounds}`;$('cycleStat').textContent=`1 / ${base.cycles}`;$('totalStat').textContent=fmt(total(initial)/1000);$('nextPhase').textContent=phaseLabel(initial[base.prepare>0?1:0]);return}if(completed){$('phase').textContent='완료';$('clock').textContent='00:00';$('intervalNote').textContent='오늘도 수고했어요!';$('nextPhase').textContent='완료';$('totalStat').textContent='00:00';return}$('phase').textContent=phaseLabel(p);$('clock').textContent=fmt(remainingMs/1000);$('intervalNote').textContent=running?'온전히 지금 이 순간에 집중해요':'시작할 준비가 됐어요';$('roundStat').textContent=`${p.round} / ${base.rounds}`;$('cycleStat').textContent=`${p.cycle} / ${base.cycles}`;$('totalStat').textContent=fmt(total(phases,phaseIndex,remainingMs)/1000);$('nextPhase').textContent=phaseLabel(phases[phaseIndex+1]||{type:'done'})}
-function onPhase(){lastAnnounced=new Set();let p=phases[phaseIndex];if(!p)return;if(p.type==='work'||p.type==='rest'||p.type==='cycle'){sound();pulseVibration();if(p.type==='work'&&sounds.roundName)speak(`${p.round}라운드 운동 시작`);else if(p.type==='rest')speak('휴식');}paint()}
-function countdown(){let sec=Math.ceil(remainingMs/1000),p=phases[phaseIndex];if(!p||lastAnnounced.has(sec))return;lastAnnounced.add(sec);if(sounds.countdown&&sec<=3&&sec>=1){sound('beep');if(sounds.voice)speak(String(sec))}else if(sec===10&&sounds.ten)speak('10초 남음');else if(sec===5&&sounds.five)speak('5초 남음')}
-function frame(){if(!running)return;const now=performance.now();remainingMs=Math.max(0,deadline-now);let guard=0;while(remainingMs<=0&&running&&guard++<phases.length+1){const overdue=Math.max(0,now-deadline);phaseIndex++;if(phaseIndex>=phases.length){completed=true;running=false;cancelAnimationFrame(raf);$('startBtn').textContent='▶ 다시 시작하기';sound();pulseVibration([250,100,250,100,250]);paint();return}remainingMs=phases[phaseIndex].ms;deadline=now+remainingMs-overdue;remainingMs=Math.max(0,deadline-now);onPhase()}countdown();paint();raf=requestAnimationFrame(frame)}
-function resetTimer(){running=false;cancelAnimationFrame(raf);phases=[];phaseIndex=0;remainingMs=0;deadline=0;completed=false;activePreset=null;$('startBtn').textContent='▶ 시작하기';$('selectedName').textContent=cur().name;paint()}
-function toggleTimer(){getAudio();if(!sounds.enabled)notify('소리가 꺼져 있어요. 아래 소리 체크박스를 켜 주세요.');else if(sounds.volume===0)notify('마스터 음량이 0이에요. 사운드 설정에서 올려 주세요.');if(running){remainingMs=Math.max(0,deadline-performance.now());running=false;cancelAnimationFrame(raf);$('startBtn').textContent='▶ 계속하기';paint();return}if(!phases.length||completed){activePreset={...cur()};phases=build(activePreset);phaseIndex=0;completed=false;remainingMs=phases[0].ms;onPhase()}deadline=performance.now()+remainingMs;running=true;$('startBtn').textContent='Ⅱ 잠시 멈추기';frame()}
+function onPhase(){lastAnnounced=new Set();let p=phases[phaseIndex];if(!p)return;if(p.type==='work'||p.type==='rest'||p.type==='cycle'){const message=p.type==='work'&&sounds.roundName?`${p.round}라운드 운동 시작`:p.type==='rest'?'휴식':null;alertThenVoice(sounds.kind,message);pulseVibration();}paint()}
+function countdown(){let sec=Math.ceil(remainingMs/1000),p=phases[phaseIndex];if(!p||lastAnnounced.has(sec))return;lastAnnounced.add(sec);if(sounds.countdown&&sec<=3&&sec>=1){alertThenVoice('beep',sounds.voice?String(sec):null)}else if(sec===10&&sounds.ten)voiceOnly('10초 남음');else if(sec===5&&sounds.five)voiceOnly('5초 남음')}
+function frame(){if(!running)return;const now=performance.now();remainingMs=Math.max(0,deadline-now);let guard=0;while(remainingMs<=0&&running&&guard++<phases.length+1){const overdue=Math.max(0,now-deadline);phaseIndex++;if(phaseIndex>=phases.length){completed=true;running=false;cancelAnimationFrame(raf);$('startBtn').textContent='▶ 다시 시작하기';alertThenVoice(sounds.kind);pulseVibration([250,100,250,100,250]);paint();return}remainingMs=phases[phaseIndex].ms;deadline=now+remainingMs-overdue;remainingMs=Math.max(0,deadline-now);onPhase()}countdown();paint();raf=requestAnimationFrame(frame)}
+function resetTimer(){++cueSerial;stopCueAudio();running=false;cancelAnimationFrame(raf);phases=[];phaseIndex=0;remainingMs=0;deadline=0;completed=false;activePreset=null;$('startBtn').textContent='▶ 시작하기';$('selectedName').textContent=cur().name;paint()}
+function toggleTimer(){getAudio();if(!sounds.enabled)notify('소리가 꺼져 있어요. 아래 소리 체크박스를 켜 주세요.');else if(sounds.volume===0)notify('마스터 음량이 0이에요. 사운드 설정에서 올려 주세요.');if(running){++cueSerial;stopCueAudio();remainingMs=Math.max(0,deadline-performance.now());running=false;cancelAnimationFrame(raf);$('startBtn').textContent='▶ 계속하기';paint();return}if(!phases.length||completed){activePreset={...cur()};phases=build(activePreset);phaseIndex=0;completed=false;remainingMs=phases[0].ms;onPhase()}deadline=performance.now()+remainingMs;running=true;$('startBtn').textContent='Ⅱ 잠시 멈추기';frame()}
 function skip(){if(!phases.length||completed)return;phaseIndex++;if(phaseIndex>=phases.length){completed=true;running=false;pulseVibration([250,100,250]);paint();$('startBtn').textContent='▶ 다시 시작하기';return}remainingMs=phases[phaseIndex].ms;if(running)deadline=performance.now()+remainingMs;onPhase()}
 function selectPreset(id){if(running){notify('실행 중에는 타이머를 변경할 수 없어요');return}selected=id;store(SEL,id);resetTimer();renderPresets()}
 function renderPresets(){let root=$('presetList');root.replaceChildren();presets.forEach(p=>{const b=document.createElement('button');b.className='preset'+(p.id===selected?' selected':'');const summ=fmt((p.prepare+p.cycles*p.rounds*p.work+(p.rounds*p.cycles-1)*p.rest+(p.cycles-1)*p.cycleRest));b.innerHTML=`${p.id===selected?'<small>선택됨</small>':''}<h3></h3><p></p>`;b.querySelector('h3').textContent=p.name;b.querySelector('p').textContent=`운동 ${fmt(p.work)} · 휴식 ${fmt(p.rest)} / ${p.rounds}라운드 × ${p.cycles}사이클\n총 ${summ}`;b.onclick=()=>selectPreset(p.id);root.appendChild(b)})}
