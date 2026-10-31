@@ -186,7 +186,7 @@ for(const [key,path] of Object.entries(recordedPaths)){
   const a=new Audio(path);a.preload='auto'; recordedPlayers[key]=a;
 }
 let missingAudioWarned=new Set();
-// V5.2: alert sound first, then voice after a 600ms gap. No simultaneous playback.
+// V5.5: start voice 600ms after the alert starts (not after it ends).
 let cueSerial=0;
 const GAP_AFTER_ALERT_MS=600;
 function stopCueAudio(){
@@ -229,13 +229,11 @@ function speak(txt){
 function alertThenVoice(kind, text=null){
   const mySerial=++cueSerial;
   stopCueAudio();
-  // A new cue takes priority over an earlier spoken message.
-  const afterSound=sound(kind);
+  // The delay is measured from the ALERT START, not from the alert's end.
+  // Longer recorded sounds can overlap the voice after 600 ms.
+  sound(kind);
   if(!text||!sounds.enabled||!sounds.voice)return;
-  Promise.resolve(afterSound).then(()=>{
-    if(mySerial!==cueSerial)return;
-    setTimeout(()=>{if(mySerial===cueSerial)speak(text)},GAP_AFTER_ALERT_MS);
-  });
+  setTimeout(()=>{if(mySerial===cueSerial)speak(text)},GAP_AFTER_ALERT_MS);
 }
 function voiceOnly(text){
   ++cueSerial;
